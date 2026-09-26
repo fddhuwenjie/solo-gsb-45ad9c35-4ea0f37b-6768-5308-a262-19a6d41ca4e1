@@ -388,3 +388,33 @@ textarea { resize: vertical; width: 100%; }
 }
 .edge.cf-tree-edge .edge-path { stroke: #c084fc; stroke-width: 3; stroke-dasharray: none; }
 .edge.conflict-hit.cf-tree-edge .edge-path { stroke: var(--danger); }
+
+/* ---------- 可复算复盘结论包 ---------- */
+#packPanel { border-top: 2px solid rgba(74, 222, 128, 0.3); }
+.btn-file { display: inline-block; text-align: center; cursor: pointer; }
+.btn-file:hover { border-color: var(--accent); color: var(--accent); }
+#packDirtyHint { color: var(--evidence); margin: 2px 0 6px; }
+#packResult { margin-top: 8px; }
+.pack-verdict {
+  font-size: 12px; font-weight: 600; padding: 6px 10px; border-radius: 6px;
+  margin: 6px 0; border: 1px solid var(--border);
+}
+.pack-verdict.pass { background: rgba(74,222,128,.1); border-color: rgba(74,222,128,.5); color: #bbf7d0; }
+.pack-verdict.fail { background: rgba(248,113,113,.1); border-color: rgba(248,113,113,.5); color: #fecaca; }
+.pack-hash {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px; word-break: break-all; line-height: 1.5;
+}
+.pack-diff {
+  background: var(--bg); border: 1px solid rgba(248,113,113,.4); border-radius: 6px;
+  padding: 5px 8px; margin: 5px 0; font-size: 11px;
+}
+.pack-pointer {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px; color: #fca5a5; word-break: break-all;
+}
+.pack-vals { color: var(--text-dim); margin-top: 3px; line-height: 1.6; word-break: break-all; }
+.pack-vals code {
+  color: var(--text); background: var(--bg-panel-2); border-radius: 4px;
+  padding: 0 4px; font-size: 10px;
+}

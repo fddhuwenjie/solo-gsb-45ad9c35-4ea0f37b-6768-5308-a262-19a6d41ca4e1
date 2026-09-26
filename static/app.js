@@ -32,6 +32,14 @@ const S = {
     sig: '',
     seq: 0,
   },
+  // 可复算复盘结论包（只读）：eventId=待导出的结论事件；result=最近一次核验结果
+  pack: {
+    eventId: null,
+    sig: '',
+    checking: false,
+    result: null,
+    fileName: '',
+  },
 };
 
 function emptyHits() { return { nodes: new Set(), edges: new Set(), data: null }; }
@@ -516,6 +524,7 @@ function renderAll() {
   // 先同步沙盘控件（结构变化时重建列表并丢弃过期依据树），再按需本地即时推演
   pruneSandboxSelection();
   renderSandboxControls();
+  renderPackControls();
   if (!S.sandbox.active) {
     $('sandboxResult').innerHTML =
       '<p class="muted small">选择目标并勾选干预点后即时推演；未提交工作图即时生效。</p>';
@@ -1505,6 +1514,139 @@ function renderSandboxResult() {
   }));
 }
 
+// ---------- 可复算复盘结论包（只读导出 / 核验） ----------
+//
+// 导出：GET /api/conclusion-pack/{event_id}?version_id= —— 服务端收集事件、全部
+// causes 祖先与关联证据，连同版本元数据、包内重算的时间窗与证据审查组成自包含
+// payload，并对紧凑 UTF-8 JSON（键按字典序）计算 SHA-256，整体作为文件下载。
+// 核验：POST /api/conclusion-pack/verify —— 先校验 digest，再仅凭包内节点/连线
+// 重建 DAG 重算比对。两者均不写库、不生成版本、不改变工作图。
+
+function renderPackControls() {
+  const events = [...S.work.nodes.values()].filter((n) => n.type === 'event');
+  const ver = S.viewingVersion || S.work.version_id;
+  const sig = ver + '|' + events.map((n) => n.id).join('|');
+  if (S.pack.sig !== sig) {
+    S.pack.sig = sig;
+    const sel = $('packEvent');
+    sel.innerHTML = '';
+    sel.appendChild(hEl('option', { value: '' }));
+    sel.options[0].textContent = '— 请选择结论事件 —';
+    for (const n of events) {
+      const o = hEl('option', { value: n.id });
+      o.textContent = n.title;
+      sel.appendChild(o);
+    }
+    if (S.pack.eventId && events.some((n) => n.id === S.pack.eventId)) {
+      sel.value = S.pack.eventId;
+    } else {
+      S.pack.eventId = null;
+    }
+  }
+  $('packDirtyHint').hidden = !(changeCount() > 0 && !S.viewingVersion);
+}
+
+async function exportPack() {
+  const eventId = S.pack.eventId;
+  if (!eventId) { flashBanner('请先选择结论事件。'); return; }
+  const vid = S.viewingVersion || S.work.version_id;
+  let res;
+  try {
+    res = await fetch(`/api/conclusion-pack/${encodeURIComponent(eventId)}?version_id=${vid}`);
+  } catch (e) {
+    flashBanner('导出失败：' + e.message);
+    return;
+  }
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    flashBanner('导出失败：' + (data.detail || `HTTP ${res.status}`));
+    return;
+  }
+  const blob = await res.blob();
+  const dispo = res.headers.get('Content-Disposition') || '';
+  const m = dispo.match(/filename="?([^";]+)"?/);
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = m ? m[1] : `conclusion-pack-v${vid}-${eventId}.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+  toast(`结论包已导出（v${vid} · 只读，不影响工作图）`);
+}
+
+async function verifyPackFile(file) {
+  if (!file) return;
+  let pack;
+  try {
+    pack = JSON.parse(await file.text());
+  } catch (e) {
+    S.pack.result = { ok: false, verdict: 'fail', digest: null,
+                      errors: [`文件不是合法 JSON：${e.message}`], mismatches: [] };
+    S.pack.fileName = file.name;
+    renderPackResult();
+    return;
+  }
+  S.pack.checking = true;
+  S.pack.fileName = file.name;
+  renderPackResult();
+  try {
+    S.pack.result = await api('/api/conclusion-pack/verify', {
+      method: 'POST',
+      body: JSON.stringify(pack),
+    });
+  } catch (err) {
+    S.pack.result = { ok: false, verdict: 'fail', digest: null,
+                      errors: [err.message], mismatches: [] };
+  }
+  S.pack.checking = false;
+  renderPackResult();
+}
+
+const fmtPackVal = (v, missing) => {
+  if (missing) return '〈缺失〉';
+  const s = JSON.stringify(v);
+  return s === undefined ? '〈缺失〉' : trunc(s, 120);
+};
+
+function renderPackResult() {
+  const box = $('packResult');
+  if (S.pack.checking) {
+    box.innerHTML = '<p class="muted small">核验中…</p>';
+    return;
+  }
+  const r = S.pack.result;
+  if (!r) {
+    box.innerHTML = '<p class="muted small">导出与核验均为只读：不写库、不生成版本、不改变工作图。</p>';
+    return;
+  }
+  const fileLine = S.pack.fileName
+    ? `<div class="kv">文件：<b>${esc(S.pack.fileName)}</b></div>` : '';
+  const digestHtml = r.digest ? `
+    <div class="kv">摘要 SHA-256：
+      <span class="status-chip ${r.digest.match ? 'supported' : 'refuted'}">${r.digest.match ? '匹配' : '不匹配'}</span>
+    </div>
+    <div class="kv pack-hash">包内　${esc(r.digest.packaged || '〈缺失〉')}</div>
+    <div class="kv pack-hash">重算　${esc(r.digest.recomputed || '—')}</div>` : '';
+  const errorsHtml = (r.errors || []).map((e) =>
+    `<div class="pack-diff"><span class="pack-pointer">结构 / 摘要</span><div class="pack-vals">${esc(e)}</div></div>`
+  ).join('');
+  const diffsHtml = (r.mismatches || []).map((d) => `
+    <div class="pack-diff">
+      <div class="pack-pointer">${esc(d.pointer)}</div>
+      <div class="pack-vals">
+        包内值 <code>${esc(fmtPackVal(d.packaged, d.packaged_missing))}</code><br/>
+        重算值 <code>${esc(fmtPackVal(d.recomputed, d.recomputed_missing))}</code>
+      </div>
+    </div>`).join('');
+  const checked = r.checked
+    ? `<div class="kv">核验范围：${r.checked.events} 事件 / ${r.checked.nodes} 节点 / ${r.checked.edges} 连线</div>` : '';
+  box.innerHTML = r.ok
+    ? `<div class="pack-verdict pass">✔ 核验通过：摘要匹配，时间窗与证据审查重算一致</div>
+       ${fileLine}${digestHtml}${checked}`
+    : `<div class="pack-verdict fail">✘ 核验未通过</div>
+       ${fileLine}${digestHtml}${checked}${errorsHtml}${diffsHtml}
+       ${!errorsHtml && !diffsHtml ? '<p class="muted small">未获得具体差异明细。</p>' : ''}`;
+}
+
 // ---------- 指针交互（平移 / 拖节点 / 拉线） ----------
 
 const drag = { mode: null };
@@ -1735,6 +1877,17 @@ function bindUI() {
     } else {
       toggleSandboxOff();
     }
+  });
+
+  // 可复算复盘结论包
+  $('packEvent').addEventListener('change', (ev) => {
+    S.pack.eventId = ev.target.value || null;
+  });
+  $('btnPackExport').addEventListener('click', () => { void exportPack(); });
+  $('packFile').addEventListener('change', (ev) => {
+    const file = ev.target.files?.[0];
+    ev.target.value = '';  // 允许重复选择同一文件
+    void verifyPackFile(file);
   });
 
   $('btnZoomIn').addEventListener('click', () => zoomAt(null, 1.15));

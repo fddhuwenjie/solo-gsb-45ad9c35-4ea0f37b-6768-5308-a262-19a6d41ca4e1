@@ -62,6 +62,16 @@ still_active，并给出目标的递归依据树。
   - **完全只读**：不产生 changeset、不生成版本、不写库；未提交工作图在前端本地即时推演
     （与后端同构），干净当前版 / 历史快照调 `POST /api/counterfactual/simulate`
   - `trigger_mode` 随事务提交、快照复制与回滚保存；旧数据库启动时幂等迁移，历史事件行回填默认 `ANY`
+- **可复算复盘结论包（Recomputable Conclusion Pack）**
+  - 从当前版或任一历史快照选择一个事件，服务端收集**该事件 + 全部 `causes` 祖先 +
+    这些事件关联的 `supports`/`refutes` 证据**，连同**版本元数据**、在包内子图上重算的
+    **有效时间窗**与**证据审查结果**组成自包含 payload
+  - 节点与连线按 ID 排序、对象键按字典序，对 payload 的**紧凑 UTF-8 JSON** 计算 **SHA-256**；
+    页面一键下载含 `digest` 的结论包文件（`conclusion-pack-v{版本}-{事件}.json`）
+  - **上传核验（只读）**：先校验 `digest`，再**仅凭包内原始节点与连线**重建 DAG，
+    重算时间窗与证据审查，与随包结果**逐字段比对**；任何差异都列出
+    **JSON Pointer + 包内值 + 重算值**，仅当摘要匹配且重算一致时显示「✔ 核验通过」
+  - 导出与核验均**不写库、不生成版本、不改变工作图**；核验接口完全不接触数据库
 
 ## 🚀 一条命令启动
 
@@ -102,6 +112,8 @@ SQLite 数据库默认位于 `./data/app.db`，可用环境变量 `DB_PATH` 覆�
 | POST | `/api/versions/rollback` | 以 `target_version_id` 生成回滚新版本 |
 | GET | `/api/nodes/{id}/downstream?version_id=` | 重算某节点下游影响（不传版本号则取最新） |
 | POST | `/api/counterfactual/simulate` | 反事实干预沙盘推演（只读，见下） |
+| GET | `/api/conclusion-pack/{event_id}?version_id=` | 导出可复算复盘结论包文件（只读，见下） |
+| POST | `/api/conclusion-pack/verify` | 上传结论包只读核验（digest + 重算逐字段比对） |
 | GET | `/health` | 健康检查 |
 
 交互文档：启动后访问 <http://localhost:8000/docs>。
@@ -337,19 +349,100 @@ curl -X POST http://localhost:8000/api/changes/commit \
 
 证据节点的 `reliability` / `source_group` 随节点对象直接返回（未设置为 `null`）。
 
+### 可复算复盘结论包示例
+
+**导出**：选择一个事件（当前版或历史快照均可，`version_id` 留空取当前最新版），
+服务端收集该事件、全部 `causes` 祖先及这些事件关联的 `supports`/`refutes` 证据，
+连同版本元数据与包内重算结果组成自包含 payload，并附 SHA-256 摘要，整体作为文件下载：
+
+```bash
+# 当前最新版（-OJ 按 Content-Disposition 保存为 conclusion-pack-v{版本}-n-null.json）
+curl -OJ "http://localhost:8000/api/conclusion-pack/n-null"
+
+# 指定历史快照
+curl -OJ "http://localhost:8000/api/conclusion-pack/n-null?version_id=1"
+```
+
+文件结构（节点 / 连线按 ID 排序；`digest` 针对 `payload` 的紧凑 UTF-8 JSON，
+即 `json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))` 的 SHA-256）：
+
+```json
+{
+  "format": "incident-conclusion-pack",
+  "format_version": 1,
+  "digest": "sha256:9f2c…",
+  "payload": {
+    "event_id": "n-null",
+    "version": {"id": 1, "message": "初始示例：支付链路中断复盘", "kind": "commit",
+                "base_id": null, "created_at": "2026-09-26T08:00:00Z"},
+    "nodes": [ {"id": "e-deploy", "type": "evidence", ...}, {"id": "e-dissent", ...}, ... ],
+    "edges": [ {"id": "e1", "source_id": "n-code", "target_id": "n-null", "kind": "causes", ...}, ... ],
+    "results": {
+      "time_windows":     { "n-code": {...}, "n-config": {...}, "n-null": {...} },
+      "evidence_reviews": { "n-code": {...}, "n-config": {...}, "n-null": {...} }
+    }
+  }
+}
+```
+
+> 时间窗与证据审查在**包内子图**上计算：有效下界与全图一致（祖先已全量收集），
+> 有效上界只由包内事件收紧 —— 这样核验方**仅凭包内数据**即可复算出完全相同的结果。
+
+**核验**：上传结论包文件，服务端先校验 `digest`，再仅凭包内原始节点与连线重建 DAG，
+重算时间窗与证据审查，与随包结果逐字段比对（全程只读，不接触数据库）：
+
+```bash
+curl -X POST http://localhost:8000/api/conclusion-pack/verify \
+  -H 'Content-Type: application/json' \
+  --data-binary @conclusion-pack-v1-n-null.json
+```
+
+通过时返回：
+
+```json
+{
+  "ok": true, "verdict": "pass",
+  "digest": {"packaged": "sha256:9f2c…", "recomputed": "sha256:9f2c…", "match": true},
+  "errors": [], "mismatches": [],
+  "checked": {"events": 3, "nodes": 8, "edges": 7}
+}
+```
+
+任何差异（含篡改后重新计算了 digest 的情况）都会以 JSON Pointer 定位并给出两端值，
+此时 `ok=false`、页面显示「✘ 核验未通过」：
+
+```json
+{
+  "ok": false, "verdict": "fail",
+  "digest": {"packaged": "sha256:aaaa…", "recomputed": "sha256:aaaa…", "match": true},
+  "errors": [],
+  "mismatches": [
+    {"pointer": "/results/time_windows/n-null/effective_lower",
+     "packaged": "2026-09-20T03:00:00Z", "recomputed": "2026-09-20T02:00:30Z",
+     "packaged_missing": false, "recomputed_missing": false}
+  ],
+  "checked": {"events": 3, "nodes": 8, "edges": 7}
+}
+```
+
+结构非法（缺节点 / 悬空端点 / 成环 / 缺 `results` 等）会列入 `errors`；只有
+**摘要匹配且重算逐字段一致**才判定通过。前端侧栏「可复算复盘结论包」面板提供
+事件选择、一键下载与上传核验（结果显示摘要比对与全部差异明细）。
+
 ## 🏗️ 架构与目录
 
 ```
 .
 ├── app/
-│   ├── main.py       # FastAPI 路由：提交事务、回滚、下游查询、反事实推演、静态托管
+│   ├── main.py       # FastAPI 路由：提交事务、回滚、下游查询、反事实推演、结论包导出/核验、静态托管
 │   ├── graph.py      # 图加载、changeset 校验（成环检测/证据字段）、时间窗传播、证据强度审查、BFS 下游、反事实拓扑推演、快照持久化
+│   ├── conclusion_pack.py  # 可复算复盘结论包：自包含导出（SHA-256 摘要）与只读核验（重建 DAG 重算逐字段比对）
 │   ├── database.py   # SQLite 连接、表结构、v1 示例数据
 │   └── schemas.py    # Pydantic 请求/响应模型
 ├── static/
 │   ├── index.html    # 三栏布局：顶栏 / 画布 / 侧栏
 │   ├── style.css
-│   └── app.js        # 状态管理、SVG 渲染、拖拽/连线、changeset 累计与提交
+│   └── app.js        # 状态管理、SVG 渲染、拖拽/连线、changeset 累计与提交、结论包导出/核验
 ├── Dockerfile
 ├── docker-compose.yml
 └── requirements.txt
@@ -398,6 +491,19 @@ edges 表把 CHECK 约束扩展到 `refutes`（历史行原样复制）。
 3. 依据树递归到前因：ANY 发生取 id 最小的仍发生前因、阻止时列全部；
    ALL 发生列全部、阻止时取 id 最小的已阻止前因；干预点与无前因事件不展开
 4. 纯只读：不写库、不产生 changeset / 版本；前端对未提交工作图用同构 JS 引擎即时推演
+
+### 结论包导出与核验（`conclusion_pack.build_pack` / `verify_pack`）
+
+1. 导出：沿 `causes` 边向上收集结论事件的全部祖先，再收集这些事件的 `supports`/`refutes`
+   证据与相关连线；节点 / 连线按 id 排序建子图，在子图上复用 `compute_time_windows` /
+   `compute_evidence_review` 重算结果，与版本元数据一起组成 payload
+2. 摘要：`digest = "sha256:" + SHA256(紧凑 UTF-8 JSON(payload))`，紧凑形式为
+   `sort_keys=True, separators=(",", ":"), ensure_ascii=False`；导出与核验共用同一规范化函数
+3. 核验：先重算 payload 摘要并与包内 `digest` 比对；再仅凭包内 `nodes`/`edges` 重建内存 DAG
+   （校验 id 唯一、端点存在、无环），重算时间窗与证据审查，与 `payload.results` 逐字段深比较，
+   差异以 RFC 6901 JSON Pointer + 包内值 + 重算值列出（键缺失用 `packaged_missing` /
+   `recomputed_missing` 标注）
+4. 导出与核验均为纯函数 / 只读：不写库、不生成版本、不改变工作图；核验接口不依赖数据库连接
 
 ## 📌 说明
 

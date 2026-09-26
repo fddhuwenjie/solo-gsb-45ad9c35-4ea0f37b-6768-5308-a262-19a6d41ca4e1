@@ -1,16 +1,17 @@
-"""FastAPI 入口：图编辑 API + 静态前端托管。"""
+"""FastAPI 入口：图编辑 API + 结论包导出/核验 + 静态前端托管。"""
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi import Body, Depends, FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from app import database, graph
+from app import conclusion_pack, database, graph
 from app.schemas import CommitRequest, CounterfactualRequest, RollbackRequest
 from app.graph import GraphError
 
@@ -146,6 +147,43 @@ def counterfactual_simulate(body: CounterfactualRequest, conn: sqlite3.Connectio
         return graph.simulate_counterfactual(g, body.target_id, body.prevented_ids)
     except GraphError as exc:
         raise HTTPException(status_code=400, detail=exc.message)
+
+
+# ---------- 可复算复盘结论包（只读：不写库、不生成版本、不改变工作图） ----------
+
+@app.get("/api/conclusion-pack/{event_id}")
+def export_conclusion_pack(event_id: str, version_id: int | None = None,
+                           conn: sqlite3.Connection = Depends(get_conn)):
+    """导出自包含结论包文件：事件 + 全部 causes 祖先 + 关联证据 + 版本元数据 +
+    包内重算的时间窗与证据审查结果，并附 payload 的 SHA-256 摘要。"""
+    vid = version_id or graph.current_version_id(conn)
+    g = graph.load_graph(conn, vid)
+    if g is None:
+        raise HTTPException(status_code=404, detail=f"版本不存在：{vid}")
+    row = conn.execute("SELECT * FROM versions WHERE id = ?", (vid,)).fetchone()
+    version_meta = {"id": row["id"], "message": row["message"], "kind": row["kind"],
+                    "base_id": row["base_id"], "created_at": row["created_at"]}
+    try:
+        pack = conclusion_pack.build_pack(g, version_meta, event_id)
+    except GraphError as exc:
+        if exc.code == "node_not_found":
+            raise HTTPException(status_code=404, detail=exc.message)
+        raise
+    # 文件体本身也按「键字典序」序列化（便于阅读与 diff）；digest 针对紧凑形式
+    body = json.dumps(pack, ensure_ascii=False, sort_keys=True, indent=2)
+    filename = f"conclusion-pack-v{vid}-{event_id}.json"
+    return Response(
+        content=body.encode("utf-8"),
+        media_type="application/json; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/api/conclusion-pack/verify")
+def verify_conclusion_pack(pack: Any = Body(...)):
+    """只读核验上传的结论包：先校验 digest，再仅凭包内节点/连线重建 DAG，
+    重算时间窗与证据审查并逐字段比对。不接触数据库。"""
+    return conclusion_pack.verify_pack(pack)
 
 
 # ---------- 提交一组修改（事务：校验整张图，任一失败全部拒绝） ----------

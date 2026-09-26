@@ -132,6 +132,26 @@
         </div>
       </div>
 
+      <div class="panel" id="packPanel">
+        <h3>可复算复盘结论包</h3>
+        <p class="muted small">
+          从当前查看的版本选择一个事件，导出含 <b>SHA-256 摘要</b>的自包含结论包
+          （事件 + 全部因果祖先 + 关联证据 + 版本元数据 + 时间窗与证据审查结果）。
+          上传结论包可只读核验：先校验摘要，再仅凭包内数据重建 DAG 重算比对。
+        </p>
+        <div class="detail-row">
+          <label>结论事件（当前查看版本）</label>
+          <select id="packEvent"></select>
+        </div>
+        <div class="sandbox-actions">
+          <button class="btn btn-small" id="btnPackExport">导出结论包</button>
+          <label class="btn btn-small btn-file" for="packFile">上传核验…</label>
+          <input type="file" id="packFile" accept="application/json,.json" hidden />
+        </div>
+        <div id="packDirtyHint" class="muted small" hidden>存在未提交修改：导出基于已提交版本，未提交的新事件不可导出。</div>
+        <div id="packResult"><p class="muted small">导出与核验均为只读：不写库、不生成版本、不改变工作图。</p></div>
+      </div>
+
       <div class="panel panel-grow" id="versionsPanel">
         <h3>版本快照</h3>
         <button class="btn btn-small btn-refresh" id="btnRefreshVersions">刷新</button>
