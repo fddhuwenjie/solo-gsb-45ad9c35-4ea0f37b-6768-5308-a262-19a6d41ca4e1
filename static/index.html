@@ -132,6 +132,27 @@
         </div>
       </div>
 
+      <div class="panel" id="packagePanel">
+        <h3>可复算复盘结论包</h3>
+        <p class="muted small">
+          导出一个事件的<b>自包含结论包</b>：该事件、全部 causes 祖先与关联 supports/refutes 证据，
+          连同版本元数据、按包内子图重算的有效时间窗与证据审查结果，并附 SHA-256 摘要。
+          上传结论包文件可<b>只读核验</b>：先校验摘要，再仅凭包内原始节点与连线重建 DAG
+          重算并逐字段比对。<b>导出与核验均不写库、不生成版本。</b>
+        </p>
+        <div class="detail-row">
+          <label>根事件（导出基于服务端版本）</label>
+          <select id="pkgEvent"></select>
+        </div>
+        <div class="muted small" id="pkgBasis"></div>
+        <div class="sandbox-actions">
+          <button class="btn btn-small" id="btnPkgExport">导出结论包</button>
+          <button class="btn btn-small" id="btnPkgVerify">上传核验…</button>
+          <input type="file" id="pkgFile" accept=".json,application/json" hidden />
+        </div>
+        <div id="pkgResult"><p class="muted small">尚未导出 / 核验。核验仅针对上传文件，不改变当前工作图。</p></div>
+      </div>
+
       <div class="panel panel-grow" id="versionsPanel">
         <h3>版本快照</h3>
         <button class="btn btn-small btn-refresh" id="btnRefreshVersions">刷新</button>

@@ -1,16 +1,17 @@
 """FastAPI 入口：图编辑 API + 静态前端托管。"""
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from app import database, graph
+from app import conclusion, database, graph
 from app.schemas import CommitRequest, CounterfactualRequest, RollbackRequest
 from app.graph import GraphError
 
@@ -146,6 +147,49 @@ def counterfactual_simulate(body: CounterfactualRequest, conn: sqlite3.Connectio
         return graph.simulate_counterfactual(g, body.target_id, body.prevented_ids)
     except GraphError as exc:
         raise HTTPException(status_code=400, detail=exc.message)
+
+
+# ---------- 可复算复盘结论包（只读：不写库、不生成版本、不改变工作图） ----------
+
+@app.get("/api/conclusion/export/{event_id}")
+def export_conclusion(event_id: str, version_id: int | None = None,
+                      conn: sqlite3.Connection = Depends(get_conn)):
+    """导出自包含结论包文件：事件 + 全部 causes 祖先 + 关联证据 + 版本元数据 +
+    按包内子图重算的时间窗 / 证据审查结果，并附 payload 的 SHA-256 摘要。"""
+    vid = version_id or graph.current_version_id(conn)
+    g = graph.load_graph(conn, vid)
+    if g is None:
+        raise HTTPException(status_code=404, detail=f"版本不存在：{vid}")
+    row = conn.execute("SELECT * FROM versions WHERE id = ?", (vid,)).fetchone()
+    try:
+        package = conclusion.build_package(g, row, event_id)
+    except GraphError as exc:
+        raise HTTPException(status_code=404, detail=exc.message)
+    # 文件内容本身即规范化 JSON（键按字典序、节点/连线按 id 排序），下载后可原样核验
+    content = conclusion.package_file_bytes(package)
+    filename = f"conclusion-{event_id}-v{vid}-{package['digest']['value'][:8]}.json"
+    return Response(
+        content=content,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/api/conclusion/verify")
+async def verify_conclusion(request: Request):
+    """只读核验上传的结论包：先校验 digest，再仅凭包内原始节点与连线重建 DAG，
+    重算时间窗与证据审查并与随包结果逐字段比对。不接触数据库。"""
+    raw = await request.body()
+    if len(raw) > conclusion.MAX_PACKAGE_BYTES:
+        raise HTTPException(status_code=413, detail="结论包文件过大")
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise HTTPException(status_code=400, detail="文件不是有效的 UTF-8 JSON")
+    try:
+        return conclusion.verify_package(doc)
+    except conclusion.PackageError as exc:
+        raise HTTPException(status_code=400, detail=f"结论包结构非法：{exc}")
 
 
 # ---------- 提交一组修改（事务：校验整张图，任一失败全部拒绝） ----------

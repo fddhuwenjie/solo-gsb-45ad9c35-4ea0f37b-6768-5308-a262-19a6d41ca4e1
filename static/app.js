@@ -516,6 +516,7 @@ function renderAll() {
   // 先同步沙盘控件（结构变化时重建列表并丢弃过期依据树），再按需本地即时推演
   pruneSandboxSelection();
   renderSandboxControls();
+  renderPkgControls();
   if (!S.sandbox.active) {
     $('sandboxResult').innerHTML =
       '<p class="muted small">选择目标并勾选干预点后即时推演；未提交工作图即时生效。</p>';
@@ -1505,6 +1506,123 @@ function renderSandboxResult() {
   }));
 }
 
+// ---------- 可复算复盘结论包（导出 / 核验均只读：不写库、不生成版本、不改变工作图） ----------
+//
+// 导出：服务端收集根事件、全部 causes 祖先与关联 supports/refutes 证据，连同版本元数据、
+//       按包内子图重算的时间窗与证据审查结果组成自包含 payload，并对紧凑 UTF-8 JSON
+//       计算 SHA-256；页面下载含 digest 的文件（文件内容即服务端原字节）。
+// 核验：上传文件 → 服务端先校验 digest，再仅凭包内原始节点与连线重建 DAG，
+//       重算时间窗与证据审查并逐字段比对；摘要匹配且重算一致才显示「通过」。
+const pkg = { sig: '' };
+
+/** 导出可选的根事件：历史浏览 = 该快照；否则 = 已提交当前版（未提交修改不纳入导出）。 */
+function pkgEventNodes() {
+  const src = S.viewingVersion ? [...S.work.nodes.values()] : (S.committed?.nodes || []);
+  return src.filter((n) => n.type === 'event')
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
+function renderPkgControls() {
+  const events = pkgEventNodes();
+  const sig = (S.viewingVersion || 'cur') + '|' + events.map((n) => n.id).join('|');
+  const sel = $('pkgEvent');
+  if (pkg.sig !== sig) {
+    const prev = sel.value;
+    pkg.sig = sig;
+    sel.innerHTML = '';
+    if (!events.length) {
+      const o = hEl('option', { value: '' });
+      o.textContent = '— 暂无事件 —';
+      sel.appendChild(o);
+    } else {
+      for (const n of events) {
+        const o = hEl('option', { value: n.id });
+        o.textContent = `${n.id} · ${trunc(n.title, 12)}`;
+        sel.appendChild(o);
+      }
+      if (events.some((n) => n.id === prev)) sel.value = prev;
+    }
+  }
+  $('btnPkgExport').disabled = !events.length;
+  $('pkgBasis').textContent = S.viewingVersion
+    ? `导出基于所浏览的历史快照 v${S.viewingVersion}（只读）。`
+    : `导出基于当前版 v${S.committed?.version_id ?? '-'}` +
+      (changeCount() ? '；存在未提交修改，不包含在导出中。' : '。');
+}
+
+async function exportConclusionPackage() {
+  const eventId = $('pkgEvent').value;
+  if (!eventId) { flashBanner('请先选择要导出的根事件。'); return; }
+  const qs = S.viewingVersion ? `?version_id=${S.viewingVersion}` : '';
+  try {
+    const res = await fetch(`/api/conclusion/export/${encodeURIComponent(eventId)}${qs}`);
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail || `导出失败 (${res.status})`);
+    }
+    const blob = await res.blob();  // 原样保存服务端字节，保证摘要可核验
+    const m = (res.headers.get('Content-Disposition') || '').match(/filename="?([^";]+)"?/);
+    const name = m ? m[1] : `conclusion-${eventId}.json`;
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    $('pkgResult').innerHTML =
+      `<p class="muted small">已导出 <b>${esc(name)}</b>（含 SHA-256 摘要）。导出不写库、不生成版本。</p>`;
+    toast('结论包已导出');
+  } catch (err) {
+    flashBanner(err.message);
+  }
+}
+
+async function verifyConclusionPackage(file) {
+  const box = $('pkgResult');
+  box.innerHTML = '<p class="muted">核验中…</p>';
+  try {
+    const text = await file.text();  // 原样上传文件内容，由服务端解析与规范化
+    const r = await api('/api/conclusion/verify', { method: 'POST', body: text });
+    renderPkgVerify(file.name, r);
+  } catch (err) {
+    box.innerHTML = `<div class="pkg-verdict fail">✘ 核验失败：${esc(err.message)}</div>`;
+  }
+}
+
+const fmtPkgVal = (v) => (v === undefined ? '（缺失）' : JSON.stringify(v));
+
+function renderPkgVerify(fname, r) {
+  const rec = r.recompute;
+  const meta = r.meta || {};
+  const diffsHtml = rec.diffs.length ? `
+    <table class="diff-table">
+      <thead><tr><th>JSON Pointer</th><th>包内值</th><th>重算值</th></tr></thead>
+      <tbody>${rec.diffs.map((d) => `<tr>
+        <td class="mono">${esc(d.pointer)}</td>
+        <td class="mono">${esc(fmtPkgVal(d.packaged))}</td>
+        <td class="mono">${esc(fmtPkgVal(d.recomputed))}</td>
+      </tr>`).join('')}</tbody>
+    </table>
+    ${rec.diffs_truncated ? '<p class="muted small">差异过多，仅列出前 200 条。</p>' : ''}` : '';
+  $('pkgResult').innerHTML = `
+    <div class="pkg-verdict ${r.ok ? 'ok' : 'fail'}">
+      ${r.ok ? '✔ 通过：摘要匹配，时间窗与证据审查重算一致' : '✘ 未通过'}
+    </div>
+    <div class="kv">文件：<b>${esc(fname)}</b></div>
+    ${meta.root_event_id ? `<div class="kv">根事件：<b>${esc(meta.root_event_title || meta.root_event_id)}</b>
+      （${esc(meta.root_event_id)}）· 来源版本 v${esc(String(meta.version_id ?? '-'))}
+      · ${esc(String(meta.node_count ?? '-'))} 节点 / ${esc(String(meta.edge_count ?? '-'))} 连线</div>` : ''}
+    <div class="pkg-checks">
+      <span class="pkg-check ${r.digest.match ? 'ok' : 'bad'}">${r.digest.match ? '✓ 摘要匹配' : '✗ 摘要不匹配'}</span>
+      <span class="pkg-check ${rec.consistent ? 'ok' : 'bad'}">${rec.consistent ? '✓ 重算一致' : '✗ 重算不一致'}</span>
+    </div>
+    <div class="kv mono tiny">包内摘要 ${esc(r.digest.expected)}<br/>实算摘要 ${esc(r.digest.actual)}</div>
+    ${rec.error ? `<div class="pkg-check bad">重建 / 比对失败：${esc(rec.error)}</div>` : ''}
+    ${diffsHtml}
+    <p class="muted small">只读核验：不写库、不生成版本、不改变工作图。</p>`;
+}
+
 // ---------- 指针交互（平移 / 拖节点 / 拉线） ----------
 
 const drag = { mode: null };
@@ -1735,6 +1853,15 @@ function bindUI() {
     } else {
       toggleSandboxOff();
     }
+  });
+
+  // 可复算复盘结论包
+  $('btnPkgExport').addEventListener('click', exportConclusionPackage);
+  $('btnPkgVerify').addEventListener('click', () => $('pkgFile').click());
+  $('pkgFile').addEventListener('change', (ev) => {
+    const f = ev.target.files?.[0];
+    if (f) void verifyConclusionPackage(f);
+    ev.target.value = '';  // 允许重复选择同一文件
   });
 
   $('btnZoomIn').addEventListener('click', () => zoomAt(null, 1.15));

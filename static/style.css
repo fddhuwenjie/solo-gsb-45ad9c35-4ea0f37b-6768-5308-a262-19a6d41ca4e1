@@ -388,3 +388,28 @@ textarea { resize: vertical; width: 100%; }
 }
 .edge.cf-tree-edge .edge-path { stroke: #c084fc; stroke-width: 3; stroke-dasharray: none; }
 .edge.conflict-hit.cf-tree-edge .edge-path { stroke: var(--danger); }
+
+/* ---------- 可复算复盘结论包 ---------- */
+#packagePanel { border-top: 2px solid rgba(56, 189, 248, 0.35); }
+#pkgBasis { margin: 2px 0 4px; }
+.pkg-verdict {
+  font-size: 12px; padding: 6px 10px; border-radius: 6px; margin: 6px 0;
+  border: 1px solid var(--border);
+}
+.pkg-verdict.ok { background: rgba(74,222,128,.1); border-color: rgba(74,222,128,.5); color: #bbf7d0; }
+.pkg-verdict.fail { background: rgba(248,113,113,.1); border-color: rgba(248,113,113,.5); color: #fecaca; }
+.pkg-checks { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0; }
+.pkg-check {
+  font-size: 11px; padding: 2px 8px; border-radius: 8px;
+  border: 1px solid var(--border); color: var(--text-dim);
+}
+.pkg-check.ok { color: var(--ok); border-color: rgba(74,222,128,.5); background: rgba(74,222,128,.08); }
+.pkg-check.bad { color: #fca5a5; border-color: rgba(248,113,113,.5); background: rgba(248,113,113,.08); }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.tiny { font-size: 10px; word-break: break-all; line-height: 1.5; }
+.diff-table { width: 100%; border-collapse: collapse; font-size: 10px; margin: 6px 0; }
+.diff-table th, .diff-table td {
+  border: 1px solid var(--border); padding: 3px 6px;
+  text-align: left; vertical-align: top; word-break: break-all;
+}
+.diff-table th { color: var(--text-dim); font-weight: 600; background: var(--bg); }

@@ -6,7 +6,8 @@
 并对指定节点重算下游影响。内置**证据强度审查**：证据带可靠度与来源组，按支持 / 反驳两个方向
 聚合并自动判定每个事件「已支持 / 已反驳 / 存在争议 / 证据不足」。另有只读的**反事实干预沙盘**：
 勾选若干被阻止事件并指定观察目标，按事件的 `trigger_mode`（ANY / ALL）拓扑推演 prevented /
-still_active，并给出目标的递归依据树。
+still_active，并给出目标的递归依据树。**可复算复盘结论包**：把任一事件连同全部 causes 祖先、
+关联证据、版本元数据与重算结论打包成带 SHA-256 摘要的自包含文件，可下载留存、可上传只读核验。
 
 ## ✨ 功能特性
 
@@ -62,6 +63,16 @@ still_active，并给出目标的递归依据树。
   - **完全只读**：不产生 changeset、不生成版本、不写库；未提交工作图在前端本地即时推演
     （与后端同构），干净当前版 / 历史快照调 `POST /api/counterfactual/simulate`
   - `trigger_mode` 随事务提交、快照复制与回滚保存；旧数据库启动时幂等迁移，历史事件行回填默认 `ANY`
+- **可复算复盘结论包（Recomputable Conclusion Package）**
+  - 从当前版或任一历史快照选择一个事件，服务端收集**该事件、全部 `causes` 祖先、
+    以及这些事件关联的 `supports` / `refutes 证据**，连同**版本元数据**、按包内子图重算的
+    **有效时间窗**与**证据审查结果**，组成**自包含 payload**
+  - 规范化：对象键按**字典序**、节点与连线按 **ID 排序**，对 payload 的**紧凑 UTF-8 JSON**
+    计算 **SHA-256**；页面可下载含 digest 的 `.json` 文件（文件内容即规范化 JSON）
+  - **上传核验（只读）**：先校验 digest，再**仅凭包内原始节点与连线重建 DAG**，
+    重算时间窗与证据审查，与随包结果**逐字段比对**；任何差异都列出
+    **JSON Pointer、包内值、重算值**；**摘要匹配且重算一致**才显示「✔ 通过」
+  - 导出与核验均**不写库、不生成版本、不改变工作图**；核验甚至不接触数据库（自包含）
 
 ## 🚀 一条命令启动
 
@@ -102,6 +113,8 @@ SQLite 数据库默认位于 `./data/app.db`，可用环境变量 `DB_PATH` 覆�
 | POST | `/api/versions/rollback` | 以 `target_version_id` 生成回滚新版本 |
 | GET | `/api/nodes/{id}/downstream?version_id=` | 重算某节点下游影响（不传版本号则取最新） |
 | POST | `/api/counterfactual/simulate` | 反事实干预沙盘推演（只读，见下） |
+| GET | `/api/conclusion/export/{event_id}?version_id=` | 导出可复算复盘结论包文件（只读，见下） |
+| POST | `/api/conclusion/verify` | 上传结论包文件做只读核验（见下） |
 | GET | `/health` | 健康检查 |
 
 交互文档：启动后访问 <http://localhost:8000/docs>。
@@ -337,19 +350,100 @@ curl -X POST http://localhost:8000/api/changes/commit \
 
 证据节点的 `reliability` / `source_group` 随节点对象直接返回（未设置为 `null`）。
 
+### 可复算复盘结论包示例
+
+**导出**：`GET /api/conclusion/export/{event_id}`（`version_id` 留空取当前最新版，传历史快照 id
+则按该版本导出）。响应即结论包文件（`Content-Disposition: attachment`），内容为规范化 JSON
+（对象键按字典序、节点与连线按 id 排序）：
+
+```bash
+curl -OJ http://localhost:8000/api/conclusion/export/n-null
+# 保存为 conclusion-n-null-v1-<digest前8位>.json；导出历史快照：
+curl -OJ "http://localhost:8000/api/conclusion/export/n-null?version_id=1"
+```
+
+文件结构（节选）：
+
+```json
+{
+  "format": "incident-conclusion-package",
+  "format_version": 1,
+  "digest": {
+    "algorithm": "sha256",
+    "canonicalization": "json:utf8,compact,sort_keys,integral-floats-as-int",
+    "value": "36b288a4…"
+  },
+  "payload": {
+    "meta": { "root_event_id": "n-null", "version_id": 1, "version_message": "…",
+              "generated_at": "2026-09-26T…", "node_count": 8, "edge_count": 7 },
+    "nodes": [ { "id": "e-deploy", "type": "evidence", … }, … ],
+    "edges": [ { "id": "e1", "kind": "causes", … }, … ],
+    "results": {
+      "time_windows":     { "n-null": { "effective_lower": "2026-09-20T02:00:30Z", … }, … },
+      "evidence_reviews": { "n-null": { "support_score": 0.9, "refute_score": 0.7,
+                                        "status": "disputed", … }, … }
+    }
+  }
+}
+```
+
+- `payload.nodes` / `payload.edges` 是**原始数据**（根事件 + 全部 causes 祖先 + 关联证据）；
+  `payload.results` 是**在包内子图上重算**的时间窗与证据审查 —— 因此包是自包含的：
+  结论只依赖包内数据（注意：根事件下游不在包内，其 latest 不参与有效上界）。
+- `digest.value` = 对 `payload` 的紧凑 UTF-8 JSON（`sort_keys`、无空格分隔符，且整数值浮点
+  如 `60.0` 规范化为 `60`）计算的 SHA-256。数字规范化使摘要可用任意标准 JSON 工具复算，例如：
+  `jq -cjS .payload pkg.json | sha256sum`（`-j` 去掉末尾换行；已实测与 jq / Node `JSON.stringify` 一致）。
+
+**核验**：`POST /api/conclusion/verify`，请求体为上传文件的原始内容（`Content-Type: application/json`）：
+
+```bash
+curl -X POST http://localhost:8000/api/conclusion/verify \
+  -H 'Content-Type: application/json' \
+  --data-binary @conclusion-n-null-v1-36b288a4.json
+```
+
+响应（通过时）：
+
+```json
+{
+  "ok": true,
+  "digest":   { "algorithm": "sha256", "expected": "36b288a4…", "actual": "36b288a4…", "match": true },
+  "recompute": { "consistent": true, "error": null, "events_checked": 3,
+                 "diff_count": 0, "diffs_truncated": false, "diffs": [] },
+  "meta": { "root_event_id": "n-null", "version_id": 1, … }
+}
+```
+
+核验分两步，**都通过** `ok` 才为 `true`（页面显示「✔ 通过」）：
+
+1. **摘要校验**：对包内 `payload` 重新规范化并计算 SHA-256，与 `digest.value` 比对；
+2. **重算比对**：仅凭 `payload.nodes` / `payload.edges` 重建 DAG，重算时间窗与证据审查，
+   与 `payload.results` 逐字段比对。任何差异都在 `recompute.diffs` 中列出
+   **JSON Pointer、包内值、重算值**（缺失侧为 `null`，差异最多列 200 条）：
+
+```json
+{ "pointer": "/results/evidence_reviews/n-null/support_score",
+  "packaged": 0.45, "recomputed": 0.9 }
+```
+
+即使篡改者改动结果后重新计算了 digest（摘要匹配），重算比对仍会逐字段抓出差异。
+文件不是合法 JSON、缺 `format` / `digest` / `payload` 或版本号不支持时返回 HTTP 400。
+导出与核验均**不写库、不生成版本、不改变工作图**；核验不接触数据库。
+
 ## 🏗️ 架构与目录
 
 ```
 .
 ├── app/
-│   ├── main.py       # FastAPI 路由：提交事务、回滚、下游查询、反事实推演、静态托管
+│   ├── main.py       # FastAPI 路由：提交事务、回滚、下游查询、反事实推演、结论包导出/核验、静态托管
 │   ├── graph.py      # 图加载、changeset 校验（成环检测/证据字段）、时间窗传播、证据强度审查、BFS 下游、反事实拓扑推演、快照持久化
+│   ├── conclusion.py # 可复算复盘结论包：自包含 payload 收集、规范化 SHA-256 摘要、上传包重建 DAG 重算并逐字段比对（纯只读）
 │   ├── database.py   # SQLite 连接、表结构、v1 示例数据
 │   └── schemas.py    # Pydantic 请求/响应模型
 ├── static/
 │   ├── index.html    # 三栏布局：顶栏 / 画布 / 侧栏
 │   ├── style.css
-│   └── app.js        # 状态管理、SVG 渲染、拖拽/连线、changeset 累计与提交
+│   └── app.js        # 状态管理、SVG 渲染、拖拽/连线、changeset 累计与提交、结论包导出下载与核验展示
 ├── Dockerfile
 ├── docker-compose.yml
 └── requirements.txt
@@ -398,6 +492,21 @@ edges 表把 CHECK 约束扩展到 `refutes`（历史行原样复制）。
 3. 依据树递归到前因：ANY 发生取 id 最小的仍发生前因、阻止时列全部；
    ALL 发生列全部、阻止时取 id 最小的已阻止前因；干预点与无前因事件不展开
 4. 纯只读：不写库、不产生 changeset / 版本；前端对未提交工作图用同构 JS 引擎即时推演
+
+### 可复算复盘结论包（`conclusion.build_package` / `conclusion.verify_package`）
+
+1. **收集范围**：从根事件沿 `causes` 边反向遍历得到全部祖先事件；包内连线 = 祖先锥内的
+   `causes` 边 + 指向这些事件的 `supports` / `refutes` 边（证据节点随边纳入）
+2. **自包含结果**：有效时间窗与证据审查在**包内子图**上重算（与 `/api/state` 同一套
+   `compute_time_windows` / `compute_evidence_review`），节点 / 连线先按 id 排序再计算，
+   保证导出端与核验端遍历顺序一致、结果可逐字节复现
+3. **摘要**：`digest.value = SHA-256(紧凑 UTF-8 JSON(payload))` —— 对象键按字典序、无空格分隔符，
+   整数值浮点规范化为整数（`60.0` → `60`，与 jq / JavaScript 的序列化一致）；
+   导出文件本身也是键按字典序、数字规范化后的 JSON
+4. **核验**：重新规范化 `payload` 并比对 digest → 仅用包内 `nodes` / `edges` 重建内存 DAG
+   （不接触数据库）→ 重算结果与 `payload.results` 递归逐字段比对，差异以 JSON Pointer 报告
+   （`~0` / `~1` 转义，缺失侧为 `null`，数字 `1` 与 `1.0` 视为相等，最多列 200 条）
+5. 两个方向都纯只读：不写库、不生成版本、不改变工作图
 
 ## 📌 说明
 
