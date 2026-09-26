@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>事故复盘因果图</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">⟳</span>
+      <span>事故复盘因果图</span>
+      <span class="ver-badge" id="versionBadge">v-</span>
+    </div>
+    <div class="commit-area">
+      <span class="dirty-count" id="dirtyCount"></span>
+      <input type="text" id="commitMessage" maxlength="200" placeholder="本次修改说明（必填）" />
+      <button id="btnCommit" class="btn btn-primary" disabled>提交一组修改（事务）</button>
+      <button id="btnDiscard" class="btn" disabled>放弃修改</button>
+    </div>
+  </header>
+
+  <div class="banner-error" id="errorBanner" hidden>
+    <span id="errorText"></span>
+    <button class="banner-close" id="btnCloseError">×</button>
+  </div>
+  <div class="banner-viewing" id="viewBanner" hidden>
+    <span id="viewBannerText"></span>
+    <button class="btn btn-small" id="btnBackToCurrent">返回当前版</button>
+    <button class="btn btn-small btn-warn" id="btnRollbackView">以此版本回滚</button>
+  </div>
+
+  <main class="layout">
+    <section class="canvas-wrap" id="canvasWrap">
+      <svg id="svg" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#7dd3fc" />
+          </marker>
+          <marker id="arrow-evidence" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#fbbf24" />
+          </marker>
+          <marker id="arrow-refutes" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#fb7185" />
+          </marker>
+          <marker id="arrow-affected" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#4ade80" />
+          </marker>
+          <marker id="arrow-conflict" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#f87171" />
+          </marker>
+          <marker id="arrow-tree" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#c084fc" />
+          </marker>
+        </defs>
+        <g id="viewport">
+          <g id="edgeLayer"></g>
+          <g id="tempLayer"></g>
+          <g id="nodeLayer"></g>
+        </g>
+      </svg>
+
+      <div class="canvas-toolbar">
+        <button class="btn btn-small" id="btnZoomIn">＋</button>
+        <button class="btn btn-small" id="btnZoomOut">－</button>
+        <button class="btn btn-small" id="btnZoomReset">复位视图</button>
+      </div>
+      <div class="hint">拖拽节点移动 · 从节点右侧圆点拖出连线 · 拖空白处平移 · 滚轮缩放 · Delete 删除选中元素</div>
+    </section>
+
+    <aside class="sidebar">
+      <div class="panel" id="addPanel">
+        <h3>录入</h3>
+        <div class="seg">
+          <button class="seg-btn active" data-add="event">＋ 事件</button>
+          <button class="seg-btn" data-add="evidence">＋ 证据</button>
+        </div>
+        <input type="text" id="newTitle" maxlength="200" placeholder="标题，如：数据库连接池耗尽" />
+        <textarea id="newDesc" rows="2" placeholder="描述 / 证据材料（可选）"></textarea>
+        <div id="evidenceFields">
+          <div class="ev-field-row">
+            <input type="number" id="newReliability" min="0" max="1" step="0.05" value="0.5" title="证据可靠度 0~1" />
+            <input type="text" id="newSourceGroup" maxlength="100" placeholder="来源组（留空为独立来源）" />
+          </div>
+        </div>
+        <button class="btn btn-primary btn-block" id="btnAddNode">添加到画布</button>
+        <p class="panel-note" id="addNote">事件 → 事件：因果（causes，源事件不晚于目标事件）<br/>证据 → 事件：支持（supports，可在连线详情切换为反驳 refutes）<br/>证据可填可靠度（0~1）与来源组；同组每方向只计最高可靠度一条<br/>事件可在详情中填写带时区的发生时间窗</p>
+      </div>
+
+      <div class="panel" id="detailPanel">
+        <h3 id="detailTitle">未选中元素</h3>
+        <div id="detailBody"><p class="muted">点击节点或连线查看详情，可编辑标题/描述/标签。</p></div>
+      </div>
+
+      <div class="panel" id="impactPanel">
+        <h3>下游影响重算</h3>
+        <p class="muted small">沿因果与支持边向下 BFS 分层，重算指定节点的全部下游。</p>
+        <div id="impactBody"><p class="muted">选中一个节点后点击「重算下游影响」。</p></div>
+      </div>
+
+      <div class="panel" id="sandboxPanel">
+        <h3>反事实干预沙盘</h3>
+        <p class="muted small">
+          勾选多个被阻止事件（干预点）并指定观察目标，系统按拓扑顺序推演
+          prevented / still_active。<b>只读</b>，不产生 changeset 或版本。
+          事件触发模式：<b>ANY</b>=任一前因发生即触发；<b>ALL</b>=全部前因均发生才触发；无前因的事件默认发生。
+        </p>
+        <div class="detail-row">
+          <label>观察目标（事件）</label>
+          <select id="sandboxTarget"></select>
+        </div>
+        <div class="detail-row">
+          <label>被阻止事件（可多选 = 干预点）</label>
+          <div id="sandboxPrevented" class="sandbox-checklist"></div>
+        </div>
+        <div class="sandbox-actions">
+          <button class="btn btn-small" id="btnSandboxRun">推演</button>
+          <button class="btn btn-small" id="btnSandboxClear">清空干预</button>
+        </div>
+        <div id="sandboxResult"><p class="muted small">选择目标并勾选干预点后即时推演；未提交工作图即时生效。</p></div>
+        <div class="sandbox-legend small">
+          <span><i class="lg intervention"></i>干预点</span>
+          <span><i class="lg prevented"></i>被阻止</span>
+          <span><i class="lg tree"></i>依据树</span>
+        </div>
+      </div>
+
+      <div class="panel panel-grow" id="versionsPanel">
+        <h3>版本快照</h3>
+        <button class="btn btn-small btn-refresh" id="btnRefreshVersions">刷新</button>
+        <ul class="version-list" id="versionList"></ul>
+      </div>
+    </aside>
+  </main>
+
+  <div class="toast" id="toast" hidden></div>
+  <script src="/app.js"></script>
+</body>
+</html>

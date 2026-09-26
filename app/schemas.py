@@ -1,0 +1,142 @@
+"""API 请求 / 响应模型（Pydantic v2）。"""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Any, Literal, Optional
+
+from pydantic import BaseModel, Field, field_validator
+
+NodeType = Literal["event", "evidence"]
+EdgeKind = Literal["causes", "supports", "refutes"]
+# 事件触发模式：ANY=任一前因事件发生即触发；ALL=全部前因事件均发生才触发。
+# 没有前因（causes 入度为 0）的事件默认发生，trigger_mode 对其无影响。
+TriggerMode = Literal["ANY", "ALL"]
+
+
+def to_utc_iso(dt: datetime) -> str:
+    """把带时区的时间统一换算为 UTC，并序列化为 `...Z` 形式（词序即时间序）。"""
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _check_aware(dt: datetime, field: str) -> datetime:
+    if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+        raise ValueError(f"{field} 必须带时区，例如 2026-09-20T10:00:00+08:00")
+    return dt
+
+
+# ---------- 提交一组修改 ----------
+
+class NodeCreate(BaseModel):
+    id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    type: NodeType
+    title: str = Field(min_length=1, max_length=200)
+    description: str = ""
+    pos_x: float
+    pos_y: float
+    # 仅事件节点有效；可留空（None）。必须带时区，后端统一换算为 UTC。
+    earliest_time: Optional[datetime] = None
+    latest_time: Optional[datetime] = None
+    # 仅证据节点有效：reliability 为证据可靠度（0~1）；source_group 为来源组，
+    # 同组证据在每个方向只取 reliability 最高的一条。
+    reliability: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    source_group: Optional[str] = Field(default=None, max_length=100)
+    # 仅事件节点有效：触发模式，缺省按 ANY（任一前因发生即可触发）
+    trigger_mode: Optional[TriggerMode] = None
+
+    @field_validator("earliest_time", "latest_time")
+    @classmethod
+    def _tz_required(cls, v: Optional[datetime], info) -> Optional[datetime]:
+        return _check_aware(v, info.field_name) if v is not None else v
+
+
+class NodeUpdate(BaseModel):
+    # 注意：区分「未提供」与「显式置空（清除该界限）」需配合 model_fields_set 使用，
+    # None 在语义上表示清除，因此不能把 None 当作「未修改」的默认值。
+    id: str
+    title: Optional[str] = Field(default=None, max_length=200)
+    description: Optional[str] = None
+    pos_x: Optional[float] = None
+    pos_y: Optional[float] = None
+    earliest_time: Optional[datetime] = None
+    latest_time: Optional[datetime] = None
+    reliability: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    source_group: Optional[str] = Field(default=None, max_length=100)
+    # 仅事件节点有效；显式传 None 等价于重置为 ANY（由 graph 层处理）
+    trigger_mode: Optional[TriggerMode] = None
+
+    @field_validator("earliest_time", "latest_time")
+    @classmethod
+    def _tz_required(cls, v: Optional[datetime], info) -> Optional[datetime]:
+        return _check_aware(v, info.field_name) if v is not None else v
+
+
+class EdgeCreate(BaseModel):
+    id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    source_id: str
+    target_id: str
+    kind: EdgeKind
+    label: str = ""
+
+
+class EdgeUpdate(BaseModel):
+    id: str
+    label: Optional[str] = None
+    # 仅允许在证据连线 supports / refutes 之间切换立场（causes 不可改），由 graph 层校验
+    kind: Optional[EdgeKind] = None
+
+
+class Changeset(BaseModel):
+    base_version_id: int
+    node_creates: list[NodeCreate] = []
+    node_updates: list[NodeUpdate] = []
+    node_deletes: list[str] = []
+    edge_creates: list[EdgeCreate] = []
+    edge_updates: list[EdgeUpdate] = []
+    edge_deletes: list[str] = []
+
+
+class CommitRequest(BaseModel):
+    changes: Changeset
+    message: str = Field(min_length=1, max_length=200)
+
+
+class CommitResponse(BaseModel):
+    version_id: int
+    message: str
+    created_at: str
+
+
+# ---------- 回滚 ----------
+
+class RollbackRequest(BaseModel):
+    target_version_id: int
+    message: Optional[str] = Field(default=None, max_length=200)
+
+
+# ---------- 反事实干预沙盘（只读推演，不产生 changeset / 版本） ----------
+
+class CounterfactualRequest(BaseModel):
+    # 不传 version_id 即在当前最新版本上推演；传历史快照 id 则按该版本推演
+    version_id: Optional[int] = None
+    target_id: str = Field(min_length=1, max_length=64)
+    prevented_ids: list[str] = []
+
+    @field_validator("prevented_ids")
+    @classmethod
+    def _dedupe(cls, v: list[str]) -> list[str]:
+        seen: set[str] = set()
+        out: list[str] = []
+        for x in v:
+            if x not in seen:
+                seen.add(x)
+                out.append(x)
+        return out
+
+
+# ---------- 通用错误 ----------
+
+class ErrorResponse(BaseModel):
+    detail: str
+    code: Optional[str] = None
+    cycle: Optional[list[str]] = None      # 成环时返回环上的节点 id
+    conflict: Optional[dict[str, Any]] = None  # 时间窗冲突时返回两端节点与因果链
